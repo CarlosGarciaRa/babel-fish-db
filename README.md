@@ -46,6 +46,17 @@ Desde el backend, `npm run db:apply` invoca el mismo aplicador.
 Los scripts no deben contener `BEGIN`, `COMMIT`, `ROLLBACK`, `CREATE DATABASE` ni `VACUUM`: el
 aplicador ya envuelve el lote en una transacción.
 
+## Pruebas
+
+```sh
+bash test/apply.test.sh
+```
+
+Levanta un PostgreSQL desechable en Docker, aplica el esquema y comprueba: aplicación inicial,
+repetición sin cambios, rechazo de un archivo ya aplicado modificado, rollback de un lote fallido,
+rechazo de scripts fuera de orden, concurrencia y preservación de filas entre `0001` y `0002`.
+Nunca usa el `DATABASE_URL` configurado por el usuario.
+
 ## Límites
 
 El aplicador no hace copias de seguridad ni decide cómo revertir cambios ya confirmados. Para una
