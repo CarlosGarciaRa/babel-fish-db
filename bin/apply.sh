@@ -5,6 +5,7 @@
 #
 # Usage:  DATABASE_URL=postgresql://... bin/apply.sh [sql-directory]
 # Env:    DATABASE_SQL_DIR  overrides the directory when no argument is given.
+#         DEBUG=1           prints the PostgreSQL error after a failure.
 set -euo pipefail
 
 readonly LEDGER='public.schema_changes'
@@ -35,31 +36,13 @@ for name in "${files[@]}"; do
   checksum["$name"]="$(sha256sum -- "${filepath[$name]}" | cut -d' ' -f1)"
 done
 
-psql_run() { psql "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 "$@"; }
-
-declare -A applied=()
-if [[ "$(psql_run -tA -c "SELECT to_regclass('$LEDGER') IS NOT NULL")" == "t" ]]; then
-  while IFS= read -r name; do
-    [[ -n "$name" ]] && applied["$name"]=1
-  done < <(psql_run -tA -c "SELECT filename FROM $LEDGER")
-fi
-
-declare -a pending=()
-for name in "${files[@]}"; do
-  [[ -n "${applied[$name]:-}" ]] || pending+=("$name")
-done
-if ((${#pending[@]} == 0)); then
-  printf 'SQL schema is current\n'
-  exit 0
-fi
-
-tmp="$(mktemp)"
-trap 'rm -f -- "$tmp"' EXIT
+tmp="$(mktemp)"; out="$(mktemp)"; err="$(mktemp)"
+trap 'rm -f -- "$tmp" "$out" "$err"' EXIT
 
 {
   printf "SET LOCAL lock_timeout = '5s';\n"
   printf "SET LOCAL statement_timeout = '30s';\n"
-  printf 'SELECT pg_advisory_xact_lock(%d, %d);\n' "$LOCK_CLASS" "$LOCK_OBJ"
+  printf 'DO $bf_lock$ BEGIN PERFORM pg_advisory_xact_lock(%d, %d); END $bf_lock$;\n' "$LOCK_CLASS" "$LOCK_OBJ"
   printf 'CREATE TABLE IF NOT EXISTS %s (\n' "$LEDGER"
   printf '    filename text PRIMARY KEY,\n'
   printf "    sha256 text NOT NULL CHECK (sha256 ~ '^[a-f0-9]{64}$'),\n"
@@ -73,6 +56,7 @@ trap 'rm -f -- "$tmp"' EXIT
     (( i == ${#files[@]} - 1 )) && sep=';'
     printf "    ('%s', '%s')%s\n" "$name" "${checksum[$name]}" "$sep"
   done
+  # Un archivo ya aplicado no se modifica ni se elimina: se detecta por checksum.
   cat <<'SQL'
 DO $bf$
 DECLARE
@@ -98,18 +82,28 @@ BEGIN
 END
 $bf$;
 SQL
-  for name in "${pending[@]}"; do
-    printf "\\i '%s'\n" "${filepath[$name]}"
+  # La decisión de aplicar se toma dentro de la transacción y bajo el lock, para que dos
+  # ejecuciones concurrentes no reintenten el mismo DDL.
+  for name in "${files[@]}"; do
+    printf "SELECT EXISTS (SELECT 1 FROM %s WHERE filename = '%s') AS bf_done \\\\gset\n" "$LEDGER" "$name"
+    printf '\\if :bf_done\n'
+    printf '\\else\n'
+    printf '\\i %s\n' "'${filepath[$name]}'"
     printf "INSERT INTO %s (filename, sha256) VALUES ('%s', '%s');\n" "$LEDGER" "$name" "${checksum[$name]}"
+    printf '\\echo __BF_APPLIED__ %s\n' "$name"
+    printf '\\endif\n'
   done
 } >"$tmp"
 
-if ! psql "$DATABASE_URL" -X -q -1 -v ON_ERROR_STOP=1 -f "$tmp" 2>"$tmp.err"; then
+if ! psql "$DATABASE_URL" -X -q -1 -v ON_ERROR_STOP=1 -f "$tmp" >"$out" 2>"$err"; then
   printf 'SQL application failed; nothing was committed. Check the connection, script order and checksums.\n' >&2
-  [[ "${DEBUG:-0}" == "1" ]] && cat -- "$tmp.err" >&2
-  rm -f -- "$tmp.err"
+  [[ "${DEBUG:-0}" == "1" ]] && cat -- "$err" >&2
   exit 1
 fi
-rm -f -- "$tmp.err"
 
-printf 'Applied: %s\n' "$(IFS=', '; printf '%s' "${pending[*]}")"
+applied="$(sed -n 's/^__BF_APPLIED__ //p' "$out" | paste -sd, - | sed 's/,/, /g' || true)"
+if [[ -z "$applied" ]]; then
+  printf 'SQL schema is current\n'
+else
+  printf 'Applied: %s\n' "$applied"
+fi
