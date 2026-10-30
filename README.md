@@ -4,6 +4,12 @@ Repositorio de esquema. **No es un proyecto Node**: no hay `package.json`, ni OR
 migraciones. La fuente de verdad del esquema son los archivos SQL escritos a mano de `sql/`
 (DEC-005/006).
 
+Remoto: [CarlosGarciaRa/babel-fish-db](https://github.com/CarlosGarciaRa/babel-fish-db).
+Las ramas `main` y `staging` sirven para control de versiones. Por decisión de Carlos del
+2026-10-30, ningún push ni merge en este repositorio despliega a Railway o aplica scripts
+contra una base alojada. La aplicación de SQL sigue siendo un paso manual explícito sobre
+la base seleccionada. El despliegue de la API tampoco aplica SQL automáticamente.
+
 ## Estructura
 
 ```
